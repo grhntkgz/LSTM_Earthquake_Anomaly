@@ -1,0 +1,68 @@
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import spectrogram
+
+# Kaydetmek için klasör belirleyin
+save_folder = 'sonuc_grafikler/'  # Kaydetmek istediğiniz klasörün yolu
+os.makedirs(save_folder, exist_ok=True)  # Klasör yoksa oluşturur
+
+# Analiz edilecek klasör
+data_folder = 'veri/DENEMELİK/'  # Veri dosyalarının olduğu klasörün yolu
+sampling_rate = 100  # Hz
+
+# Dönüşümün uygulanıp uygulanmayacağını kontrol eden değişken
+apply_conversion = True  # True ise dönüşüm yapılacak, False ise yapılmayacak
+
+# Klasör içerisindeki tüm CSV dosyalarını bul
+for filename in os.listdir(data_folder):
+    if filename.endswith(".csv"):
+        file_path = os.path.join(data_folder, filename)
+
+        # Veriyi yükle
+        data = pd.read_csv(file_path)
+
+        # Eğer dönüşüm yapılacaksa
+        if apply_conversion:
+            data = data * 2.43e-07 / 0.1026 / 9.81
+
+        # Varsayılan olarak tek kolon olduğunu varsayıyorum
+        data.columns = ['Acceleration']
+
+        # Baseline correction işlemi iptal edildi, yani bu satır kaldırıldı:
+        # baseline_corrected_data = data['Acceleration'] - data['Acceleration'].mean()
+
+        # STFT (Short-Time Fourier Transform) uygulama
+        f, t, Sxx = spectrogram(data['Acceleration'].values, fs=sampling_rate, nperseg=1024)
+
+        # Şekil ve alt grafik oluştur
+        fig, axs = plt.subplots(2, 1, figsize=(12, 10))
+
+        # Zaman serisi grafiği
+        time = np.arange(len(data['Acceleration'])) / sampling_rate
+        axs[0].plot(time, data['Acceleration'], color='b')
+        axs[0].set_title(f'Acceleration Time Series - {filename}')
+        axs[0].set_ylabel('Acceleration (g)')
+        axs[0].set_xlabel('Time [sec]')
+        axs[0].grid(True)
+
+        # Spektrogram grafiği
+        im = axs[1].pcolormesh(t, f, 10 * np.log10(Sxx), shading='gouraud', cmap='inferno')
+        axs[1].set_title(f'Spectrogram of Acceleration Data - {filename}')
+        axs[1].set_ylabel('Frequency [Hz]')
+        axs[1].set_xlabel('Time [sec]')
+        fig.colorbar(im, ax=axs[1], label='Power/Frequency (dB/Hz)')
+
+        # Grafik düzeni ayarla
+        plt.tight_layout()
+        #plt.show()
+
+        # Grafiği kaydet
+        save_path = os.path.join(save_folder, f'{filename}.png')
+        plt.savefig(save_path)
+
+        # Grafiği kapat
+        plt.close()
+
+        print(f'{filename} analizi tamamlandı ve {save_path} olarak kaydedildi.')
