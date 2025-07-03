@@ -1,0 +1,192 @@
+import pandas as pd
+import numpy as np
+from scipy.signal import welch
+import matplotlib.pyplot as plt
+import pywt
+from scipy.stats import skew, kurtosis
+import tkinter as tk
+from tkinter import ttk
+import os
+
+# Wavelet Entropy hesaplama fonksiyonu
+def calculate_wavelet_entropy(coeffs):
+    total_energy = sum(np.sum(c ** 2) for c in coeffs)
+    entropy = -sum(np.sum(c ** 2) / total_energy * np.log(np.sum(c ** 2) / total_energy) for c in coeffs)
+    return entropy
+
+
+def calculate_energy(data):
+    energy = np.sum(data ** 2)
+    return energy
+
+
+def calculate_spectral_features(data, fs):
+    frequencies, psd = welch(data, fs=fs, nperseg=256)
+    spectral_centroid = np.sum(frequencies * psd) / np.sum(psd)
+    spectral_bandwidth = np.sqrt(np.sum(((frequencies - spectral_centroid) ** 2) * psd) / np.sum(psd))
+    spectral_flatness = np.exp(np.mean(np.log(psd))) / np.mean(psd)
+    cumulative_energy = np.cumsum(psd)
+    total_energy = cumulative_energy[-1]
+    roll_off = frequencies[np.where(cumulative_energy >= 0.90 * total_energy)[0][0]]
+    peak_psd_index = np.argmax(psd)
+    peak_psd_frequency = frequencies[peak_psd_index]
+    peak_psd_energy = psd[peak_psd_index]
+    lower_bound = spectral_centroid - spectral_bandwidth / 2
+    upper_bound = spectral_centroid + spectral_bandwidth / 2
+    bandwidth_mask = (frequencies >= lower_bound) & (frequencies <= upper_bound)
+    bandwidth_frequencies = frequencies[bandwidth_mask]
+    bandwidth_energies = psd[bandwidth_mask]
+    bandwidth_avg_energy = np.mean(bandwidth_energies)
+
+    return (
+        spectral_centroid, spectral_bandwidth, spectral_flatness,
+        roll_off, peak_psd_frequency, peak_psd_energy,
+        bandwidth_avg_energy
+    )
+
+
+def calculate_crest_factor(data):
+    rms = np.sqrt(np.mean(data ** 2))
+    peak_value = np.max(np.abs(data))
+    crest_factor = peak_value / rms
+    return crest_factor
+
+
+def calculate_wavelet_coefficients(data, wavelet_name='db4'):
+    coeffs = pywt.wavedec(data, wavelet_name, level=3)
+    detail_coeffs = coeffs[1:]
+    wavelet_energies = [np.sum(coeff ** 2) for coeff in detail_coeffs]
+    wavelet_entropy = calculate_wavelet_entropy(detail_coeffs)
+    return wavelet_energies, wavelet_entropy
+
+
+def show_table(df):
+    root = tk.Tk()
+    root.title("Spektral Özellikler Tablosu")
+    frame = tk.Frame(root)
+    frame.pack(fill="both", expand=True)
+    tree_scroll_x = tk.Scrollbar(frame, orient="horizontal")
+    tree_scroll_x.pack(side="bottom", fill="x")
+    tree_scroll_y = tk.Scrollbar(frame, orient="vertical")
+    tree_scroll_y.pack(side="right", fill="y")
+    tree = ttk.Treeview(frame, xscrollcommand=tree_scroll_x.set, yscrollcommand=tree_scroll_y.set)
+    tree["column"] = list(df.columns)
+    tree["show"] = "headings"
+    for column in tree["column"]:
+        tree.heading(column, text=column)
+        tree.column(column, width=150)
+
+    for row in df.to_numpy().tolist():
+        tree.insert("", "end", values=row)
+
+    tree.pack(fill="both", expand=True)
+    tree_scroll_x.config(command=tree.xview)
+    tree_scroll_y.config(command=tree.yview)
+    root.mainloop()
+
+
+def main():
+    file_path = 'veri/AFYON DEPREMİ/G_combined_afyn.csv'
+    data = pd.read_csv(file_path)
+    fs = 100
+    time = data.index / fs
+
+    plt.figure(figsize=(14, 6))
+    plt.plot(time, data.iloc[:, 0], color='blue')
+    plt.title('Ham İvme Zaman Grafiği (100 Hz Örnekleme)')
+    plt.xlabel('Zaman (saniye)')
+    plt.ylabel('İvme (g)')
+    plt.grid(True)
+    plt.show()
+
+    start_time = float(input("Başlangıç zamanını (saniye) girin: "))
+    end_time = float(input("Bitiş zamanını (saniye) girin: "))
+    step_size = float(input("Adım aralığını (saniye) girin: "))
+
+    # Kullanıcıdan pencere tipini sorma
+    window_type = input("Pencere tipi (sabit/kayar): ").strip().lower()
+
+    results = []
+    label_counter = 1
+    current_time = start_time
+    while current_time < end_time:
+        start_sample = int(current_time * fs)
+
+        # Kayar pencere seçildiyse pencere sabit boyutta ilerler
+        if window_type == "kayar":
+            end_sample = start_sample + int(step_size * fs)
+        else:
+            # Sabit pencere seçildiyse pencere boyutu sabit kalır
+            end_sample = int(min((current_time + step_size) * fs, end_time * fs))
+
+        if end_sample > len(data):
+            break
+
+        selected_data = data.iloc[start_sample:end_sample, 0]
+
+        (
+            centroid, bandwidth, flatness, roll_off, peak_psd_freq, peak_psd_energy,
+            bandwidth_avg_energy
+        ) = calculate_spectral_features(selected_data, fs)
+
+        crest_factor = calculate_crest_factor(selected_data)
+        energy = calculate_energy(selected_data)
+        wavelet_energies, wavelet_entropy = calculate_wavelet_coefficients(selected_data)
+        skewness_value = skew(selected_data)
+        kurtosis_value = kurtosis(selected_data)
+
+        if current_time + step_size >= end_time:
+            label = "Deprem Anı"
+        else:
+            label = f"Zaman Aralığı {label_counter}"
+            label_counter += 1
+
+        result = {
+            "Etiket": label,
+            "Başlangıç Zamanı (saniye)": current_time,
+            "Bitiş Zamanı (saniye)": end_sample / fs,
+            "Spectral Centroid (Hz)": centroid,
+            "Spectral Bandwidth (Hz)": bandwidth,
+            "Spectral Flatness": flatness,
+            "Spectral Roll-off Frequency (Hz)": roll_off,
+            "Peak PSD Frequency (Hz)": peak_psd_freq,
+            "Peak PSD Energy": peak_psd_energy,
+            "Bandwidth Avg Energy": bandwidth_avg_energy,
+            "Crest Factor": crest_factor,
+            "Energy": energy,
+            "Skewness": skewness_value,
+            "Kurtosis": kurtosis_value,
+            "Wavelet Entropy": wavelet_entropy
+        }
+
+        for i, energy in enumerate(wavelet_energies):
+            result[f"Wavelet Energy Level {i + 1}"] = energy
+
+        results.append(result)
+
+        # Eğer kayar pencere seçildiyse, pencere adımı sabit boyutta kaydırılır
+        if window_type == "kayar":
+            current_time += step_size
+        else:
+            # Sabit pencere için pencerenin bitişi bir sonraki başlangıç zamanı olur
+            current_time = end_sample / fs
+
+    results_df = pd.DataFrame(results)
+    show_table(results_df)
+
+    base_filename = os.path.basename(file_path).replace('.csv', '')
+    output_csv_filename = f"sonuc/spectral_features_results_{base_filename}.csv"
+    output_excel_filename = f"sonuc/spectral_features_results_{base_filename}.xlsx"
+
+    # CSV formatında kaydet
+    results_df.to_csv(output_csv_filename, index=False)
+
+    # Excel formatında kaydet
+    results_df.to_excel(output_excel_filename, index=False)
+
+    print(f"Sonuçlar CSV formatında kaydedildi: {output_csv_filename}")
+    print(f"Sonuçlar Excel formatında kaydedildi: {output_excel_filename}")
+
+
+if __name__ == "__main__":
+    main()
