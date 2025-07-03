@@ -1,0 +1,192 @@
+import pandas as pd
+import numpy as np
+from scipy.signal import welch
+from scipy.stats import kurtosis, skew
+import pywt
+import matplotlib.pyplot as plt
+import tkinter as tk
+from tkinter import ttk
+import os
+
+
+def calculate_wavelet_features(data):
+    # Dalgacık dönüşümü hesapla
+    coeffs = pywt.wavedec(data, 'db4', level=4)
+
+    # Enerji hesapla (her seviyede enerji)
+    wavelet_energy_levels = [np.sum(c ** 2) for c in coeffs]
+
+    # Entropi hesapla (her seviyedeki enerjiden entropi hesaplanır)
+    total_energy = np.sum(wavelet_energy_levels)
+    wavelet_entropy = -np.sum([(e / total_energy) * np.log(e / total_energy) for e in wavelet_energy_levels if e > 0])
+
+    return wavelet_energy_levels, wavelet_entropy
+
+
+def calculate_spectral_features(data, fs):
+    # PSD hesapla
+    frequencies, psd = welch(data, fs=fs, nperseg=256)
+
+    # Spektral özellikler hesapla
+    spectral_centroid = np.sum(frequencies * psd) / np.sum(psd)
+    spectral_bandwidth = np.sqrt(np.sum(((frequencies - spectral_centroid) ** 2) * psd) / np.sum(psd))
+    spectral_flatness = np.exp(np.mean(np.log(psd))) / np.mean(psd)
+    cumulative_energy = np.cumsum(psd)
+    total_energy = cumulative_energy[-1]
+    roll_off = frequencies[np.where(cumulative_energy >= 0.70 * total_energy)[0][0]]
+
+    # PSD enerjisi en yüksek frekans
+    peak_psd_index = np.argmax(psd)
+    peak_psd_frequency = frequencies[peak_psd_index]
+    peak_psd_energy = psd[peak_psd_index]
+
+    # Bandwidth içerisindeki frekanslar
+    lower_bound = spectral_centroid - spectral_bandwidth / 2
+    upper_bound = spectral_centroid + spectral_bandwidth / 2
+    bandwidth_mask = (frequencies >= lower_bound) & (frequencies <= upper_bound)
+    bandwidth_frequencies = frequencies[bandwidth_mask]
+    bandwidth_energies = psd[bandwidth_mask]
+
+    # Bandwidth içerisindeki frekansların ortalama enerjisi
+    bandwidth_avg_energy = np.mean(bandwidth_energies)
+
+    # Eklenen özellikler
+    crest_factor = np.max(data) / np.sqrt(np.mean(data ** 2))  # Crest Factor
+    skewness_value = skew(data)  # Skewness
+    kurtosis_value = kurtosis(data)  # Kurtosis
+
+    # Wavelet Entropy ve Energy hesapla
+    wavelet_energy_levels, wavelet_entropy = calculate_wavelet_features(data)
+
+    return (
+        frequencies, psd, spectral_centroid, spectral_bandwidth, spectral_flatness,
+        roll_off, peak_psd_frequency, peak_psd_energy, bandwidth_avg_energy,
+        crest_factor, skewness_value, kurtosis_value, wavelet_entropy,
+        wavelet_energy_levels
+    )
+
+
+def show_table(df):
+    # Tkinter penceresi oluştur
+    root = tk.Tk()
+    root.title("Spektral Özellikler Tablosu")
+
+    # DataFrame'i tkinter treeview widget ile göster
+    frame = tk.Frame(root)
+    frame.pack(fill="both", expand=True)
+
+    tree = ttk.Treeview(frame)
+    tree["column"] = list(df.columns)
+    tree["show"] = "headings"
+
+    for column in tree["column"]:
+        tree.heading(column, text=column)
+
+    for row in df.to_numpy().tolist():
+        tree.insert("", "end", values=row)
+
+    tree.pack(fill="both", expand=True)
+
+    # Pencereyi çalıştır
+    root.mainloop()
+
+
+def main():
+    # Veriyi yükle
+    file_path = 'veri/BALIKESİR DEPREMİ/G-combined_balıkesir.csv'
+    data = pd.read_csv(file_path)
+
+    # Klasör ismini al
+    folder_name = os.path.basename(os.path.dirname(file_path))
+
+    # Örnekleme frekansı
+    fs = 100  # Örnekleme frekansınızı burada ayarlayın
+    time = data.index / fs  # Zamanı indeks üzerinden hesapla
+
+    # İvme zaman serisini çiz
+    plt.figure(figsize=(14, 6))
+    plt.plot(time, data.iloc[:, 0], color='blue')
+    plt.title('Acceleration Time Series')
+    plt.xlabel('Time (sec)')
+    plt.ylabel('Acceleration (g)')
+    plt.grid(True)
+    plt.show()
+
+    results = []
+    psd_results = []  # PSD grafikleri için veri depolama
+
+    while True:
+        # Kullanıcıdan zaman aralığını iste
+        start_time = input("Başlangıç zamanını (saniye) girin (veya 'exit' yazarak çıkın): ")
+        if start_time.lower() == 'exit':
+            break
+        end_time = input("Bitiş zamanını (saniye) girin: ")
+        label = input("Bu zaman aralığına bir etiket verin: ")
+
+        # Zaman aralığını belirle ve veriyi seç
+        start_sample = int(float(start_time) * fs)
+        end_sample = int(float(end_time) * fs)
+        selected_data = data.iloc[start_sample:end_sample, 0]
+
+        # Spektral ve diğer özellikleri hesapla
+        (
+            frequencies, psd, centroid, bandwidth, flatness, roll_off,
+            peak_psd_freq, peak_psd_energy, bandwidth_avg_energy,
+            crest_factor, skewness_value, kurtosis_value, wavelet_entropy,
+            wavelet_energy_levels
+        ) = calculate_spectral_features(selected_data, fs)
+
+        # Sonuçları sakla
+        results.append({
+            "Etiket": label,
+            "Spectral Centroid (Hz)": centroid,
+            "Spectral Bandwidth (Hz)": bandwidth,
+            "Spectral Flatness": flatness,
+            "Spectral Roll-off Frequency (Hz)": roll_off,
+            "Peak PSD Frequency (Hz)": peak_psd_freq,
+            "Peak PSD Energy": peak_psd_energy,
+            "Bandwidth Avg Energy": bandwidth_avg_energy,
+            "Crest Factor": crest_factor,
+            "Skewness": skewness_value,
+            "Kurtosis": kurtosis_value,
+            "Wavelet Entropy": wavelet_entropy,
+            "Wavelet Energy Level 1": wavelet_energy_levels[0],
+            "Wavelet Energy Level 2": wavelet_energy_levels[1],
+            "Wavelet Energy Level 3": wavelet_energy_levels[2],
+            "Wavelet Energy Level 4": wavelet_energy_levels[3],
+        })
+
+        # PSD verilerini sakla
+        psd_results.append((frequencies, psd, label))
+
+    # Sonuçları tablo şeklinde göster
+    results_df = pd.DataFrame(results)
+
+    # Tabloyu göster
+    show_table(results_df)
+
+    # "sonuc_tablolar" klasörünü kontrol et ve oluştur
+    output_folder = 'sonuc_tablolar'
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    # Excel dosya adını klasör ismi ile oluştur ve "sonuc_tablolar" klasörüne kaydet
+    excel_file_path = os.path.join(output_folder, f'{folder_name}_spectral_features_results.xlsx')
+    results_df.to_excel(excel_file_path, index=False)
+    print(f"Sonuçlar Excel dosyası olarak kaydedildi: {excel_file_path}")
+
+    # PSD Grafikleri çizin
+    plt.figure(figsize=(14, 8))
+    for frequencies, psd, label in psd_results:
+        plt.plot(frequencies, psd, label=f'PSD - {label}')
+    plt.title('PSD Charts for Time Intervals')
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Power Spectral Density (PSD)')
+    plt.yscale('log')  # Y ekseni logaritmik skala
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
