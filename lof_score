@@ -1,0 +1,535 @@
+import pandas as pd
+import numpy as np
+from scipy.signal import welch
+import matplotlib.pyplot as plt
+import pywt
+from scipy.stats import skew, kurtosis
+import tkinter as tk
+from tkinter import ttk
+from minisom import MiniSom
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.metrics import silhouette_score, davies_bouldin_score
+from sklearn.neighbors import LocalOutlierFactor
+from scipy.signal import butter, filtfilt
+
+# Wavelet Entropy calculation function
+def calculate_wavelet_entropy(coeffs):
+    total_energy = sum(np.sum(c ** 2) for c in coeffs)
+    entropy = -sum(np.sum(c ** 2) / total_energy * np.log(np.sum(c ** 2) / total_energy) for c in coeffs)
+    return entropy
+
+# Function to calculate energy
+def calculate_energy(data):
+    energy = np.sum(data ** 2)
+    return energy
+
+# Additional spectral feature functions
+
+# Spectral Entropy Function
+def calculate_spectral_entropy(psd):
+    psd_norm = psd / np.sum(psd)  # Normalizing the PSD
+    spectral_entropy = -np.sum(psd_norm * np.log(psd_norm + np.finfo(float).eps))  # Adding epsilon to avoid log(0)
+    return spectral_entropy
+
+# Spectral Contrast Function
+def calculate_spectral_contrast(psd, n_bands=6):
+    contrast = []
+    psd_split = np.array_split(psd, n_bands)
+    for band in psd_split:
+        contrast.append(np.max(band) / (np.min(band) + np.finfo(float).eps))  # Avoid division by zero
+    return np.mean(contrast)
+
+# Zero-Crossing Rate (ZCR) Function
+def calculate_zcr(data):
+    zcr = ((data[:-1] * data[1:]) < 0).sum() / len(data)
+    return zcr
+
+# Spectral Kurtosis Function (frequency-domain kurtosis)
+def calculate_spectral_kurtosis(psd):
+    return kurtosis(psd)
+
+# Harmonic-to-Noise Ratio (HNR) function
+def calculate_hnr(data):
+    harmonics = np.fft.fft(data)
+    hnr = np.sum(np.abs(harmonics[:len(harmonics) // 2])) / np.sum(np.abs(harmonics[len(harmonics) // 2:]))
+    return hnr
+
+# Spectral Slope Function
+def calculate_spectral_slope(frequencies, psd):
+    slope, _ = np.polyfit(frequencies, psd, 1)
+    return slope
+
+# Spectral Decrease Function
+def calculate_spectral_decrease(frequencies, psd):
+    spectral_decrease = np.sum((psd[1:] - psd[0]) / (frequencies[1:] - frequencies[0])) / len(frequencies[1:])
+    return spectral_decrease
+
+# Spectral Spread Function
+def calculate_spectral_spread(frequencies, psd, spectral_centroid):
+    spread = np.sqrt(np.sum(((frequencies - spectral_centroid) ** 2) * psd) / np.sum(psd))
+    return spread
+
+
+# Updated spectral features calculation function with additional features
+def calculate_spectral_features(data, fs, nperseg):
+    frequencies, psd = welch(data, fs=fs, nperseg=nperseg)
+    spectral_centroid = np.sum(frequencies * psd) / np.sum(psd)
+    spectral_bandwidth = np.sqrt(np.sum(((frequencies - spectral_centroid) ** 2) * psd) / np.sum(psd))
+    spectral_flatness = np.exp(np.mean(np.log(psd))) / np.mean(psd)
+    cumulative_energy = np.cumsum(psd)
+    total_energy = cumulative_energy[-1]
+    roll_off = frequencies[np.where(cumulative_energy >= 0.75 * total_energy)[0][0]]
+    peak_psd_index = np.argmax(psd)
+    peak_psd_frequency = frequencies[peak_psd_index]
+    peak_psd_energy = psd[peak_psd_index]
+    lower_bound = spectral_centroid - spectral_bandwidth / 2
+    upper_bound = spectral_centroid + spectral_bandwidth / 2
+    bandwidth_mask = (frequencies >= lower_bound) & (frequencies <= upper_bound)
+    bandwidth_frequencies = frequencies[bandwidth_mask]
+    bandwidth_energies = psd[bandwidth_mask]
+    bandwidth_avg_energy = np.mean(bandwidth_energies)
+
+    # Calculating additional spectral features
+    spectral_entropy = calculate_spectral_entropy(psd)
+    spectral_contrast = calculate_spectral_contrast(psd)
+    zcr = calculate_zcr(data)
+    spectral_kurtosis = calculate_spectral_kurtosis(psd)
+    hnr = calculate_hnr(data)
+    spectral_slope = calculate_spectral_slope(frequencies, psd)
+    spectral_decrease = calculate_spectral_decrease(frequencies, psd)
+    spectral_spread = calculate_spectral_spread(frequencies, psd, spectral_centroid)
+    # Wavelet Entropy hesaplama
+    coeffs = pywt.wavedec(data, 'db4', level=3)
+    wavelet_entropy = calculate_wavelet_entropy(coeffs[1:])
+
+    # Yeni özellik: Frekans Bandı Enerji Oranı
+    low_freq_band = (frequencies >= 0) & (frequencies <= 3)  # 0-5 Hz düşük frekans bandı
+    high_freq_band = (frequencies > 3) & (frequencies <= 50)  # 5-50 Hz yüksek frekans bandı
+
+    low_freq_energy = np.sum(psd[low_freq_band])
+    high_freq_energy = np.sum(psd[high_freq_band])
+
+    if high_freq_energy == 0:
+        high_freq_energy = 1e-10  # Bölme hatalarını önlemek için küçük bir sabit ekleyin
+
+    freq_band_energy_ratio = low_freq_energy / high_freq_energy
+
+    return (
+        spectral_centroid, spectral_bandwidth, spectral_flatness,
+        roll_off, peak_psd_frequency, peak_psd_energy, bandwidth_avg_energy,
+        spectral_entropy, spectral_contrast, zcr, spectral_kurtosis,
+        hnr, spectral_slope, spectral_decrease, spectral_spread, freq_band_energy_ratio
+    )
+
+
+# Function to calculate crest factor
+def calculate_crest_factor(data):
+    rms = np.sqrt(np.mean(data ** 2))
+    peak_value = np.max(np.abs(data))
+    crest_factor = peak_value / rms
+    return crest_factor
+
+# Function to calculate wavelet coefficients and entropy
+def calculate_wavelet_coefficients(data, wavelet_name='db4'):
+    coeffs = pywt.wavedec(data, wavelet_name, level=3)
+    detail_coeffs = coeffs[1:]
+    wavelet_energies = [np.sum(coeff ** 2) for coeff in detail_coeffs]
+    wavelet_entropy = calculate_wavelet_entropy(detail_coeffs)
+    return wavelet_energies, wavelet_entropy
+
+# Butterworth Bandpass Filter Function
+def butter_bandpass(lowcut, highcut, fs, order=4):
+    nyquist = 0.5 * fs
+    low = lowcut / nyquist
+    high = highcut / nyquist
+    b, a = butter(order, [low, high], btype='band')
+    return b, a
+
+# Function to apply the bandpass filter
+def apply_bandpass_filter(data, lowcut, highcut, fs, order=4):
+    b, a = butter_bandpass(lowcut, highcut, fs, order=order)
+    filtered_data = filtfilt(b, a, data)
+    return filtered_data
+
+# Function to display the table in a Tkinter window
+def show_table(df):
+    root = tk.Tk()
+    root.title("Spektral Özellikler Tablosu")
+    frame = tk.Frame(root)
+    frame.pack(fill="both", expand=True)
+    tree_scroll_x = tk.Scrollbar(frame, orient="horizontal")
+    tree_scroll_x.pack(side="bottom", fill="x")
+    tree_scroll_y = tk.Scrollbar(frame, orient="vertical")
+    tree_scroll_y.pack(side="right", fill="y")
+    tree = ttk.Treeview(frame, xscrollcommand=tree_scroll_x.set, yscrollcommand=tree_scroll_y.set)
+    tree["column"] = list(df.columns)
+    tree["show"] = "headings"
+    for column in tree["column"]:
+        tree.heading(column, text=column)
+        tree.column(column, width=150)
+
+    for row in df.to_numpy().tolist():
+        tree.insert("", "end", values=row)
+
+    tree.pack(fill="both", expand=True)
+    tree_scroll_x.config(command=tree.xview)
+    tree_scroll_y.config(command=tree.yview)
+    root.mainloop()
+
+# LOF with Outlier Detection
+def lof_outlier_detection(features_scaled, n_neighbors):
+    lof = LocalOutlierFactor(n_neighbors=n_neighbors, metric='cosine')
+    lof_labels = lof.fit_predict(features_scaled)  # -1: Outlier, 1: Normal
+    lof_scores = -lof.negative_outlier_factor_  # Scores (higher = more outlier)
+    return lof_labels, lof_scores
+
+# Updated main_with_lof function to include additional spectral features
+def main_with_lof():
+    # Load the CSV data
+    global freq_band_energy_ratio
+    file_path = 'veri/BOLU DEPREMİ/G-combined_bolu.csv'
+    data = pd.read_csv(file_path)
+    fs = 100  # Sampling frequency
+    time = data.index / fs
+
+    # Apply bandpass filter
+    lowcut = 0.1
+    highcut = 49
+    filtered_data = apply_bandpass_filter(data.iloc[:, 0], lowcut, highcut, fs)
+
+    # Plot the raw acceleration time series
+    plt.figure(figsize=(14, 6))
+    plt.plot(time, data.iloc[:, 0], color='blue')
+    plt.title('Ham İvme Zaman Grafiği (100 Hz Örnekleme)')
+    plt.xlabel('Zaman (saniye)')
+    plt.ylabel('İvme (g)')
+    plt.grid(True)
+    plt.show()
+
+    # Plot the filtered acceleration time series
+    plt.figure(figsize=(14, 6))
+    plt.plot(time, filtered_data, color='blue')
+    plt.title('Filtrelenmiş İvme Zaman Grafiği (100 Hz Örnekleme)')
+    plt.xlabel('Zaman (saniye)')
+    plt.ylabel('İvme (g)')
+    plt.grid(True)
+    plt.show()
+
+    # Input from the user
+    start_time = float(input("Başlangıç zamanını (saniye) girin: "))
+    end_time = float(input("Bitiş zamanını (saniye) girin: "))
+
+    step_sizes = [10]  # Step size values to test
+    window_types = ['sabit']  # Window types to test
+    nperseg_values = [96]  # nperseg values to test for Welch's method
+    n_neighbors_values = [15]  # n_neighbors values to test for LOF
+
+    # SOM parameters grid
+    som_x_values = [1]
+    som_y_values = [2]
+    learning_rate_values = [0.5]
+    sigma_values = [0.3]
+    iteration_values = [3000]
+
+    best_silhouette = -1
+    best_db_score = np.inf
+    best_params = None
+
+    # Optimize step_size, window_type, nperseg, n_neighbors, and SOM parameters
+    for step_size in step_sizes:
+        for window_type in window_types:
+            for nperseg in nperseg_values:
+                for n_neighbors in n_neighbors_values:
+                    window_results = []
+                    label_counter = 1
+                    current_time = start_time
+                    while current_time < end_time:
+                        start_sample = int(current_time * fs)
+
+                        if window_type == "kayar":
+                            end_sample = start_sample + int(step_size * fs)
+
+                        else:
+                            end_sample = int(min((current_time + step_size) * fs, end_time * fs))
+
+                        if end_sample > len(filtered_data):
+                            break
+
+                        selected_data = filtered_data[start_sample:end_sample]
+
+                        # Calculate spectral features using the optimized nperseg value
+                        (
+                            centroid, bandwidth, flatness, roll_off, peak_psd_freq, peak_psd_energy,
+                            bandwidth_avg_energy, spectral_entropy, spectral_contrast, zcr, spectral_kurtosis,
+                            hnr, spectral_slope, spectral_decrease, spectral_spread, wavelet_entropy,
+                            freq_band_energy_ratio
+                        ) = calculate_spectral_features(selected_data, fs, nperseg=nperseg)
+                        crest_factor = calculate_crest_factor(selected_data)
+                        energy = calculate_energy(selected_data)
+                        wavelet_energies, wavelet_entropy = calculate_wavelet_coefficients(selected_data)
+                        skewness_value = skew(selected_data)
+                        kurtosis_value = kurtosis(selected_data)
+
+                        if current_time + step_size >= end_time:
+                            label = "Deprem Anı"
+
+                        else:
+                            label = f"Zaman Aralığı {label_counter}"
+                            label_counter += 1
+
+                        result = {
+                            "Etiket": label,
+                            "Başlangıç Zamanı (saniye)": current_time,
+                            "Bitiş Zamanı (saniye)": end_sample / fs,
+                            "Spectral Centroid (Hz)": centroid,
+                            "Spectral Bandwidth (Hz)": bandwidth,
+                            "Spectral Flatness": flatness,
+                            "Spectral Roll-off Frequency (Hz)": roll_off,
+                            "Peak PSD Frequency (Hz)": peak_psd_freq,
+                            "Peak PSD Energy": peak_psd_energy,
+                            "Bandwidth Avg Energy": bandwidth_avg_energy,
+                            "Spectral Entropy": spectral_entropy,
+                            "Spectral Contrast": spectral_contrast,
+                            "Zero-Crossing Rate": zcr,
+                            "Spectral Kurtosis": spectral_kurtosis,
+                            "HNR": hnr,
+                            "Spectral Slope": spectral_slope,
+                            "Spectral Decrease": spectral_decrease,
+                            "Spectral Spread": spectral_spread,
+                            "Crest Factor": crest_factor,
+                            "Energy": energy,
+                            "Skewness": skewness_value,
+                            "Kurtosis": kurtosis_value,
+                            "Wavelet Entropy": wavelet_entropy,
+                            "Frequency Band Energy Ratio": freq_band_energy_ratio,
+                        }
+
+                        for i, energy in enumerate(wavelet_energies):
+                            result[f"Wavelet Energy Level {i + 1}"] = energy
+                        window_results.append(result)
+
+                        if window_type == "kayar":
+                            current_time += step_size
+
+                        else:
+                            current_time = end_sample / fs
+
+                    # Convert to DataFrame
+                    results_df = pd.DataFrame(window_results)
+
+                    # Extract features from the DataFrame
+                    feature_columns = results_df.columns[3:]
+                    features = results_df[feature_columns]
+
+                    # Standardize the features
+                    scaler = MinMaxScaler()
+                    features_scaled = scaler.fit_transform(features)
+
+                    # Loop through SOM parameters for optimization
+                    for som_x in som_x_values:
+                        for som_y in som_y_values:
+                            for lr in learning_rate_values:
+                                for sigma in sigma_values:
+                                    for iterations in iteration_values:
+                                        som = MiniSom(x=som_x, y=som_y, input_len=features_scaled.shape[1], sigma=sigma,
+                                                      learning_rate=lr)
+                                        som.random_weights_init(features_scaled)
+                                        som.train_random(features_scaled, iterations)
+
+                                        som_clusters = np.array([som.winner(x) for x in features_scaled])
+                                        cluster_ids = np.array([x[0] * som_y + x[1] for x in som_clusters])
+
+                                        n_clusters = len(set(cluster_ids))
+
+                                        if n_clusters > 1:
+                                            silhouette_avg = silhouette_score(features_scaled, cluster_ids)
+                                            db_score = davies_bouldin_score(features_scaled, cluster_ids)
+
+                                            if silhouette_avg > best_silhouette and db_score < best_db_score:
+                                                best_silhouette = silhouette_avg
+                                                best_db_score = db_score
+                                                best_params = (som_x, som_y, lr, sigma, iterations, step_size,
+                                                               window_type, nperseg, n_neighbors)
+
+    print(
+        f'Best SOM parameters: som_x={best_params[0]}, som_y={best_params[1]}, learning_rate={best_params[2]}, sigma={best_params[3]}, iterations={best_params[4]}')
+    print(f'Best Step Size: {best_params[5]}, Best Window Type: {best_params[6]}')
+    print(f'Best nperseg: {best_params[7]}, Best n_neighbors: {best_params[8]}')
+    print(f'Best Silhouette Score: {best_silhouette}')
+    print(f'Best Davies-Bouldin Score: {best_db_score}')
+
+    # Perform clustering with the best parameters
+    best_som_x, best_som_y, best_lr, best_sigma, best_iterations = best_params[:5]
+    best_step_size, best_window_type, best_nperseg, best_n_neighbors = best_params[5:9]
+
+    # Recalculate with best step_size, window_type, and nperseg
+    results = []
+    current_time = start_time
+    label_counter = 1
+
+    while current_time < end_time:
+        start_sample = int(current_time * fs)
+
+        if best_window_type == "kayar":
+            end_sample = start_sample + int(best_step_size * fs)
+        else:
+            end_sample = int(min((current_time + best_step_size) * fs, end_time * fs))
+
+        if end_sample > len(filtered_data):
+            break
+
+        selected_data = filtered_data[start_sample:end_sample]
+
+        (
+            centroid, bandwidth, flatness, roll_off, peak_psd_freq, peak_psd_energy,
+            bandwidth_avg_energy, spectral_entropy, spectral_contrast, zcr, spectral_kurtosis,
+            hnr, spectral_slope, spectral_decrease, spectral_spread
+        ) = calculate_spectral_features(selected_data, fs, nperseg=best_nperseg)
+
+        crest_factor = calculate_crest_factor(selected_data)
+        energy = calculate_energy(selected_data)
+        wavelet_energies, wavelet_entropy = calculate_wavelet_coefficients(selected_data)
+        skewness_value = skew(selected_data)
+        kurtosis_value = kurtosis(selected_data)
+
+        if current_time + best_step_size >= end_time:
+            label = "Deprem Anı"
+        else:
+            label = f"Zaman Aralığı {label_counter}"
+            label_counter += 1
+
+        result = {
+            "Etiket": label,
+            "Başlangıç Zamanı (saniye)": current_time,
+            "Bitiş Zamanı (saniye)": end_sample / fs,
+            "Spectral Centroid (Hz)": centroid,
+            "Spectral Bandwidth (Hz)": bandwidth,
+            "Spectral Flatness": flatness,
+            "Spectral Roll-off Frequency (Hz)": roll_off,
+            "Peak PSD Frequency (Hz)": peak_psd_freq,
+            "Peak PSD Energy (Hz)": peak_psd_energy,
+            "Bandwidth Avg Energy": bandwidth_avg_energy,
+            "Spectral Entropy": spectral_entropy,
+            "Spectral Contrast": spectral_contrast,
+            "Zero-Crossing Rate": zcr,
+            "Spectral Kurtosis": spectral_kurtosis,
+            "HNR": hnr,
+            "Spectral Slope": spectral_slope,
+            "Spectral Decrease": spectral_decrease,
+            "Spectral Spread": spectral_spread,
+            "Crest Factor": crest_factor,
+            "Energy": energy,
+            "Skewness": skewness_value,
+            "Kurtosis": kurtosis_value,
+            "Wavelet Entropy": wavelet_entropy,
+            "Frequency Band Energy Ratio": freq_band_energy_ratio,
+        }
+
+        for i, energy in enumerate(wavelet_energies):
+            result[f"Wavelet Energy Level {i + 1}"] = energy
+
+        results.append(result)
+
+        if best_window_type == "kayar":
+            current_time += best_step_size
+        else:
+            current_time = end_sample / fs
+
+    # Perform clustering with the best SOM parameters
+    results_df = pd.DataFrame(results)
+    feature_columns = results_df.columns[3:]
+    features = results_df[feature_columns]
+
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform(features)
+
+    som = MiniSom(x=best_som_x, y=best_som_y, input_len=features_scaled.shape[1], sigma=best_sigma,
+                  learning_rate=best_lr)
+    som.random_weights_init(features_scaled)
+    som.train_random(features_scaled, best_iterations)
+
+    som_clusters = np.array([som.winner(x) for x in features_scaled])
+    results_df['Cluster'] = [x[0] * best_som_y + x[1] for x in som_clusters]
+
+    # SOM ile Sınıf tespiti
+    plt.figure(figsize=(10, 6))
+    plt.scatter(results_df['Başlangıç Zamanı (saniye)'], results_df['Bitiş Zamanı (saniye)'], c=results_df['Cluster'],
+                cmap='tab20', s=50)
+    plt.colorbar(label='Cluster')
+    plt.xlabel('Time Interval (sec)')
+    plt.ylabel('Time Interval (sec)')
+    plt.title('SOM Clustering Results with Optimized Parameters')
+    plt.grid(True)
+    plt.show()
+
+    # LOF ile Outlier tespiti
+    lof_labels, lof_scores = lof_outlier_detection(features_scaled, n_neighbors=best_n_neighbors)
+    results_df['LOF Outlier'] = lof_labels
+    results_df['LOF Score'] = lof_scores
+
+    plt.figure(figsize=(10, 6))
+    plt.scatter(results_df['Başlangıç Zamanı (saniye)'], results_df['Bitiş Zamanı (saniye)'], c=results_df['LOF Score'],
+                cmap='coolwarm', s=50)
+    plt.colorbar(label='LOF Skorları')
+    plt.xlabel('Time Interval (sec)')
+    plt.ylabel('Time Interval (sec)')
+    plt.title('LOF Outlier Scores')
+    plt.grid(True)
+    plt.show()
+
+    # LOF skorlarını daha iyi görmek için logaritmik bir ölçek veya özel bir renk skalası kullanabilirsiniz
+    lof_scores_log = np.log1p(results_df['LOF Score']) # LOF skorlarının logaritmasını alarak dinamiği artırıyoruz
+
+    plt.figure(figsize=(10, 6))
+
+    # LOF skorlarının logaritmasını kullanarak görselleştirme, bu küçük farkları daha iyi gösterir
+    scatter = plt.scatter(results_df['Başlangıç Zamanı (saniye)'],
+                      results_df['Bitiş Zamanı (saniye)'],
+                      c=lof_scores_log, cmap='plasma', s=50)
+
+    plt.colorbar(scatter, label='LOF Skorları (Log Ölçeği)')  # Logaritmik LOF skoru için renk skalası
+    plt.xlabel('Time Interval (sec)')
+    plt.ylabel('Time Interval (sec)')
+    plt.title('LOF Outlier Scores')
+    plt.grid(True)
+    plt.show()
+
+    # LOF ile aykırı değerleri çıkart
+    non_outliers = results_df[results_df['LOF Outlier'] != -1].reset_index(drop=True)
+
+    if len(non_outliers) > 0:
+        # Tekrar özellikleri ölçeklendirin ve SOM uygulayın
+        features_non_outliers = non_outliers[feature_columns]
+        features_non_outliers_scaled = scaler.fit_transform(features_non_outliers)
+
+        som_non_outliers = MiniSom(x=best_som_x, y=best_som_y, input_len=features_non_outliers_scaled.shape[1],
+                                   sigma=best_sigma,
+                                   learning_rate=best_lr)
+        som_non_outliers.random_weights_init(features_non_outliers_scaled)
+        som_non_outliers.train_random(features_non_outliers_scaled, best_iterations)
+
+        # Kümeleri yeniden belirleyin
+        som_clusters_non_outliers = np.array([som_non_outliers.winner(x) for x in features_non_outliers_scaled])
+        non_outliers['Cluster'] = [x[0] * best_som_y + x[1] for x in som_clusters_non_outliers]
+
+        # Silhouette ve Davies-Bouldin skorlarını hesapla
+        n_clusters_non_outliers = len(set(non_outliers['Cluster']))
+        if n_clusters_non_outliers > 1:
+            silhouette_avg_non_outliers = silhouette_score(features_non_outliers_scaled, non_outliers['Cluster'])
+            db_score_non_outliers = davies_bouldin_score(features_non_outliers_scaled, non_outliers['Cluster'])
+
+            print(f'Silhouette Score after LOF Outlier Removal: {silhouette_avg_non_outliers}')
+            print(f'Davies-Bouldin Score after LOF Outlier Removal: {db_score_non_outliers}')
+
+            # LOF uygulandıktan sonra sonuçların iyileşip iyileşmediğini kontrol et
+            if silhouette_avg_non_outliers > best_silhouette and db_score_non_outliers < best_db_score:
+                print("LOF işlemi sonrası veri kümesi daha iyi ayrıştırıldı.")
+            else:
+                print("LOF işlemi sonrası veri kümesinde iyileşme görülmedi.")
+        else:
+            print("Yeterli küme sayısı elde edilemedi. Aykırı değerler çıkartıldığında kümeler yetersiz kaldı.")
+    else:
+        print("Tüm veriler aykırı olarak tespit edildi veya aykırı olmayan veri kalmadı.")
+
+if __name__ == "__main__":
+    main_with_lof()
