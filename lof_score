@@ -70,7 +70,7 @@ def calculate_spectral_spread(frequencies, psd, spectral_centroid):
     return spread
 
 
-# Updated spectral features calculation function with additional features
+# Spectral features calculation function with additional features
 def calculate_spectral_features(data, fs, nperseg):
     frequencies, psd = welch(data, fs=fs, nperseg=nperseg)
     spectral_centroid = np.sum(frequencies * psd) / np.sum(psd)
@@ -102,7 +102,7 @@ def calculate_spectral_features(data, fs, nperseg):
     coeffs = pywt.wavedec(data, 'db4', level=3)
     wavelet_entropy = calculate_wavelet_entropy(coeffs[1:])
 
-    # Yeni özellik: Frekans Bandı Enerji Oranı
+    # Frequency Band Energy Ratio
     low_freq_band = (frequencies >= 0) & (frequencies <= 3)  # 0-5 Hz düşük frekans bandı
     high_freq_band = (frequencies > 3) & (frequencies <= 50)  # 5-50 Hz yüksek frekans bandı
 
@@ -183,7 +183,6 @@ def lof_outlier_detection(features_scaled, n_neighbors):
     lof_scores = -lof.negative_outlier_factor_  # Scores (higher = more outlier)
     return lof_labels, lof_scores
 
-# Updated main_with_lof function to include additional spectral features
 def main_with_lof():
     # Load the CSV data
     global freq_band_energy_ratio
