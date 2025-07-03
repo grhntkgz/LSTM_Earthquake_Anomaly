@@ -1,0 +1,224 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.metrics import mean_squared_error
+from keras import Sequential
+from keras.layers import LSTM, Dense, Dropout, Bidirectional
+from keras import Input
+import matplotlib.pyplot as plt
+from scipy.signal import welch
+from scipy.stats import skew, kurtosis
+import pywt
+import os
+from keras.optimizers import Adamax
+
+
+# LOF Hesaplama Fonksiyonu
+def calculate_lof(features, n_neighbors=20):
+    lof = LocalOutlierFactor(n_neighbors=n_neighbors, metric='cosine')
+    lof_labels = lof.fit_predict(features)
+    lof_scores = -lof.negative_outlier_factor_
+    return lof_scores
+
+
+# Spektral ve Zaman-Domain Özelliklerini Hesaplama Fonksiyonu
+def calculate_features(data, fs):
+    frequencies, psd = welch(data, fs=fs, nperseg=128)
+
+    spectral_centroid = np.sum(frequencies * psd) / np.sum(psd)
+    spectral_bandwidth = np.sqrt(np.sum(((frequencies - spectral_centroid) ** 2) * psd) / np.sum(psd))
+    spectral_flatness = np.exp(np.mean(np.log(psd))) / np.mean(psd)
+    spectral_kurtosis = kurtosis(psd)
+    spectral_skewness = skew(psd)
+    roll_off = frequencies[np.where(np.cumsum(psd) >= 0.75 * np.sum(psd))[0][0]]
+    peak_psd_freq = frequencies[np.argmax(psd)]
+    peak_psd_energy = np.max(psd)
+
+    energy = np.sum(data ** 2)
+    crest_factor = np.max(np.abs(data)) / np.sqrt(np.mean(data ** 2))
+    zcr = ((data[:-1] * data[1:]) < 0).sum() / len(data)
+    skewness_value = skew(data)
+    kurtosis_value = kurtosis(data)
+
+    # Wavelet Entropy hesaplama
+    coeffs = pywt.wavedec(data, 'db4', level=3)
+    wavelet_entropy = calculate_wavelet_entropy(coeffs[1:])
+
+    # Yeni özellik: Frekans Bandı Enerji Oranı
+    low_freq_band = (frequencies >= 0) & (frequencies <= 3)  # 0-5 Hz düşük frekans bandı
+    high_freq_band = (frequencies > 3) & (frequencies <= 50)  # 5-50 Hz yüksek frekans bandı
+
+    low_freq_energy = np.sum(psd[low_freq_band])
+    high_freq_energy = np.sum(psd[high_freq_band])
+
+    if high_freq_energy == 0:
+        high_freq_energy = 1e-10  # Bölme hatalarını önlemek için küçük bir sabit ekleyin
+
+    freq_band_energy_ratio = low_freq_energy / high_freq_energy
+
+    # Bandwidth içerisindeki frekanslar
+    lower_bound = spectral_centroid - spectral_bandwidth / 2
+    upper_bound = spectral_centroid + spectral_bandwidth / 2
+    bandwidth_mask = (frequencies >= lower_bound) & (frequencies <= upper_bound)
+    bandwidth_energies = psd[bandwidth_mask]
+
+    # Bandwidth içerisindeki frekansların ortalama enerjisi
+    bandwidth_avg_energy = np.mean(bandwidth_energies)
+
+    return {
+        "Spectral Centroid (Hz)": spectral_centroid,
+        "Spectral Bandwidth (Hz)": spectral_bandwidth,
+        "Spectral Flatness": spectral_flatness,
+        "Spectral Kurtosis": spectral_kurtosis,
+        "Spectral Skewness": spectral_skewness,
+        "Spectral Roll-off Frequency (Hz)": roll_off,
+        "Peak PSD Frequency (Hz)": peak_psd_freq,
+        "Peak PSD Energy": peak_psd_energy,
+        "Energy": energy,
+        "Crest Factor": crest_factor,
+        "Zero-Crossing Rate": zcr,
+        "Skewness": skewness_value,
+        "Kurtosis": kurtosis_value,
+        "Wavelet Entropy": wavelet_entropy,
+        "Frequency Band Energy Ratio": freq_band_energy_ratio,
+        "Bandwidth Average Energy": bandwidth_avg_energy
+    }
+
+
+# Wavelet Entropy hesaplama fonksiyonu
+def calculate_wavelet_entropy(coeffs):
+    total_energy = sum(np.sum(c ** 2) for c in coeffs)
+    entropy = -sum(np.sum(c ** 2) / total_energy * np.log(np.sum(c ** 2) / total_energy) for c in coeffs)
+    return entropy
+
+
+# Model Tanımlama Fonksiyonu
+def define_lstm_model(input_shape):
+    model = Sequential()
+    model.add(Input(shape=input_shape))  # Giriş katmanı
+    model.add(Bidirectional(LSTM(150, activation='selu', return_sequences=True)))  # Bidirectional LSTM
+    model.add(Dropout(0.2))
+    model.add(Bidirectional(LSTM(100, activation='selu')))  # Başka bir Bidirectional LSTM
+    model.add(Dense(1))
+    # Adam optimizatörü ile öğrenme oranını ayarlayın
+    learning_rate = 0.001
+    optimizer = Adamax(learning_rate=learning_rate)
+
+    # Compile the model with Mean Squared Error (MSE) loss
+    model.compile(optimizer=optimizer, loss='mean_squared_error')  # MSE loss kullanılıyor
+    return model
+
+
+# Eğitim ve test için her pencere için geçmiş 10 pencerenin özelliklerini kullanacak şekilde yapılandıralım
+def cross_validation(directory_path):
+    fs = 100
+    coefficient = 5
+    window_size = fs * coefficient
+    step_size = window_size // 2  # Kayar pencere için kaydırma adımı (örneğin, %50 çakışma)
+    all_files = sorted([os.path.join(directory_path, f) for f in os.listdir(directory_path) if f.endswith('.csv')])
+
+    # Tahmin sonuçlarının kaydedileceği klasörü belirle
+    save_dir = "prediction_results_5"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    for test_file in all_files:
+        print(f"Testing with file: {test_file}")
+
+        # Eğitim dosyaları
+        train_files = [f for f in all_files if f != test_file]
+
+        # Eğitim verilerini hazırla
+        X_train_list = []
+        y_train_list = []
+        scaler = MinMaxScaler()
+
+        for file_path in train_files:
+            data = pd.read_csv(file_path)
+            acceleration_data = data.iloc[:, 0].values
+
+            features_list = []
+            for start in range(0, len(acceleration_data) - window_size, step_size):  # Kayar pencere
+                window_data = acceleration_data[start:start + window_size]
+                features = calculate_features(window_data, fs)
+                features_list.append(features)
+
+            results_df = pd.DataFrame(features_list)
+
+            # Özellikleri ölçeklendirme
+            features_scaled = scaler.fit_transform(results_df)
+
+            # LOF skorlarını her pencere için hesapla
+            lof_scores = calculate_lof(features_scaled)
+
+            # Geçmiş 10 pencereyi kullanarak bir sonraki pencerenin LOF skorunu hedefle
+            for i in range(20, len(features_scaled)):
+                X_train_list.append(features_scaled[i-20:i])  # Geçmiş 10 pencerenin özellikleri
+                y_train_list.append(lof_scores[i])  # Şimdiki pencerenin LOF skoru
+
+        # Eğitim verilerini birleştir
+        X_train_combined = np.array(X_train_list)
+        y_train_combined = np.array(y_train_list).reshape(-1, 1)
+
+        # Modeli tanımla
+        model = define_lstm_model((20, X_train_combined.shape[2]))
+
+        # Eğitimi gerçekleştir
+        model.fit(X_train_combined, y_train_combined, epochs=100, batch_size=64, verbose=1)
+
+        # Test verilerini hazırla
+        data = pd.read_csv(test_file)
+        acceleration_data = data.iloc[:, 0].values
+
+        features_list = []
+        for start in range(0, len(acceleration_data) - window_size, step_size):  # Kayar pencere
+            window_data = acceleration_data[start:start + window_size]
+            features = calculate_features(window_data, fs)
+            features_list.append(features)
+
+        test_df = pd.DataFrame(features_list)
+
+        # Test verilerini ölçeklendirme
+        features_scaled = scaler.transform(test_df)
+
+        # Test verilerini geçmiş 10 pencereyi kullanacak şekilde ayarla
+        X_test = []
+        y_test = []
+
+        lof_scores = calculate_lof(features_scaled)
+        for i in range(20, len(features_scaled)):
+            X_test.append(features_scaled[i-20:i])  # Geçmiş 10 pencerenin özellikleri
+            y_test.append(lof_scores[i])  # Şimdiki pencerenin LOF skoru
+
+        X_test = np.array(X_test)
+        y_test = np.array(y_test).reshape(-1, 1)
+
+        # Tahmin yap
+        y_pred = model.predict(X_test)
+
+        # Performansı ölç
+        mse = mean_squared_error(y_test, y_pred)
+        print(f"File: {test_file} - MSE: {mse}")
+
+        # Tahmin sonuçlarını kaydet
+        plt.figure(figsize=(10, 6))
+        plt.plot(y_test, color='blue', label='Actual Values')
+        plt.plot(y_pred, color='red', label='Estimated Values')
+        plt.xlabel('Window Number')
+        plt.ylabel('LOF Score')
+        plt.title(f'LOF Forecast Results with LSTM ({os.path.basename(test_file)})')
+        plt.legend()
+        plt.grid(True)
+
+        # Görseli dosyaya kaydet
+        save_path = os.path.join(save_dir, f"{os.path.basename(test_file).replace('.csv', '.png')}")
+        plt.savefig(save_path)
+        plt.close()
+
+        print(f"Prediction results saved to: {save_path}")
+
+
+if __name__ == "__main__":
+    directory = 'veri/TÜM DEPREM/'
+    cross_validation(directory)
