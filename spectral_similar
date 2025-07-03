@@ -1,0 +1,54 @@
+import pandas as pd
+import numpy as np
+from scipy.spatial.distance import cosine, euclidean, cityblock
+from scipy.stats import pearsonr, spearmanr
+
+# Veriyi yükle
+file_path = 'sonuc/spectral_features_results_G_combined_afyn.csv'
+data = pd.read_csv(file_path)
+
+# 'Etiket', 'Başlangıç Zamanı', ve 'Bitiş Zamanı' sütunlarını hariç tut
+relevant_columns = data.columns.difference(['Etiket', 'Başlangıç Zamanı (saniye)', 'Bitiş Zamanı (saniye)'])
+
+# Veriyi transpoze et
+transposed_data = data[relevant_columns].T
+
+# Son satır için korelasyon vektörünü hesapla
+last_row_corr = transposed_data.corrwith(transposed_data.iloc[:, -1])
+last_row_corr_vector = last_row_corr.reset_index(drop=True)
+
+# Benzerlik sonuçları için bir sözlük oluştur
+similarity_methods = ['Cosine', 'Euclidean', 'Manhattan', 'Pearson', 'Spearman']
+similarities = {method: [] for method in similarity_methods}
+
+# 'Etiket' satırındaki her zaman adımı için aynı işlemleri yap
+for i in range(transposed_data.shape[1] - 1):
+    row_corr = transposed_data.corrwith(transposed_data.iloc[:, i])
+    row_corr_vector = row_corr.reset_index(drop=True)
+
+    # Cosine Similarity
+    cosine_similarity = 1 - cosine(last_row_corr_vector, row_corr_vector)
+    similarities['Cosine'].append((i, cosine_similarity))
+
+    # Euclidean Distance
+    euclidean_similarity = 1 / (1 + euclidean(last_row_corr_vector, row_corr_vector))
+    similarities['Euclidean'].append((i, euclidean_similarity))
+
+    # Manhattan Distance
+    manhattan_similarity = 1 / (1 + cityblock(last_row_corr_vector, row_corr_vector))
+    similarities['Manhattan'].append((i, manhattan_similarity))
+
+    # Pearson Correlation
+    pearson_similarity, _ = pearsonr(last_row_corr_vector, row_corr_vector)
+    similarities['Pearson'].append((i, pearson_similarity))
+
+    # Spearman Correlation
+    spearman_similarity, _ = spearmanr(last_row_corr_vector, row_corr_vector)
+    similarities['Spearman'].append((i, spearman_similarity))
+
+# En benzer 10 zamanı bul ve sonuçları yazdır
+for method in similarity_methods:
+    top_10_similarities = sorted(similarities[method], key=lambda x: x[1], reverse=True)[:10]
+    print(f"\nTop 10 Similarities for **{method}**:")
+    for idx, sim in top_10_similarities:
+        print(f"{idx + 1}. Index {idx}: {sim:.4f}")
