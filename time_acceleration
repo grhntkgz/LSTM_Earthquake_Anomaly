@@ -1,0 +1,36 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load the CSV file
+file_path = 'veri/ÇORUM DEPREMİ/G-combined_corum.csv'  # Replace with your file path
+data = pd.read_csv(file_path)
+
+# Create a time vector in seconds
+sampling_rate = 100  # 100 Hz, meaning 100 samples per second
+time = data.index / sampling_rate  # Convert indices to time in seconds
+
+# Plotting the acceleration time series for the selected time range
+plt.figure(figsize=(12, 6))
+plt.plot(time, data, color='orange')
+plt.title(f'Acceleration Time Series')
+plt.xlabel('Time (seconds)')
+plt.ylabel('Acceleration (g)')
+plt.grid(True)
+plt.show()
+
+# Get the start and end times from the user
+start_time = float(input("Başlangıç zamanını saniye cinsinden girin: "))
+end_time = float(input("Bitiş zamanını saniye cinsinden girin: "))
+
+# Convert time to index range
+start_index = int(start_time * sampling_rate)
+end_index = int(end_time * sampling_rate)
+
+# Plotting the acceleration time series for the selected time range
+plt.figure(figsize=(12, 6))
+plt.plot(time[start_index:end_index], data[start_index:end_index], color='red')
+plt.title(f'Acceleration Time Series from {start_time} to {end_time} seconds')
+plt.xlabel('Time (seconds)')
+plt.ylabel('Acceleration (g)')
+plt.grid(True)
+plt.show()
